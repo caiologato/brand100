@@ -87,7 +87,7 @@ if 'preco_global' in st.session_state:
     df_ui['Valor Diária Base (R$)'] = st.session_state['preco_global']
 
 # 4. Configurações da Proposta (Sidebar)
-st.sidebar.image("Captura de Tela 2026-08-14 às 08.43.38.jpg", use_column_width=True)
+st.sidebar.image("logo.jpg", use_container_width=True)
 st.sidebar.header("Configurações do Plano")
 desconto = st.sidebar.slider("Desconto Negociado (%)", 0, 100, 0)
 
