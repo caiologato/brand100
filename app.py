@@ -2,67 +2,57 @@ import streamlit as st
 import pandas as pd
 import io
 import plotly.express as px
+import sqlite3
+from datetime import datetime, timedelta
 
-# 1. Configuração da Página e Look and Feel (Cencosud Media)
+# 1. Configuração da Página e Cores
 st.set_page_config(page_title="Simulador DOOH - Cencosud Media", page_icon="🟢", layout="wide")
 
-# Forçando cores claras para o fundo e textos escuros para resolver o bug de leitura
 st.markdown("""
     <style>
-    .stApp {
-        background-color: #F8F9FA;
-        color: #333333;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 20px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #ffffff;
-        border-radius: 4px 4px 0px 0px;
-        gap: 1px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #13C18E !important;
-        color: white !important;
-        font-weight: bold;
-    }
-    .stButton>button, .stDownloadButton>button {
-        background-color: #13C18E !important;
-        color: white !important;
-        border-radius: 8px !important;
-        border: none !important;
-        font-weight: bold !important;
-    }
-    .stButton>button:hover, .stDownloadButton>button:hover {
-        background-color: #0A7051 !important;
-    }
-    /* Estilizando as métricas */
-    div[data-testid="metric-container"] {
-        background-color: white;
-        border: 1px solid #e0e0e0;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0px 4px 6px rgba(0,0,0,0.05);
-    }
+    .stApp { background-color: #F8F9FA; color: #333333; }
+    .stTabs [data-baseweb="tab-list"] { gap: 20px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #ffffff; border-radius: 4px 4px 0px 0px; padding: 10px; }
+    .stTabs [aria-selected="true"] { background-color: #13C18E !important; color: white !important; font-weight: bold; }
+    .stButton>button, .stDownloadButton>button { background-color: #13C18E !important; color: white !important; border-radius: 8px !important; border: none !important; font-weight: bold !important; }
+    .stButton>button:hover, .stDownloadButton>button:hover { background-color: #0A7051 !important; }
+    div[data-testid="metric-container"] { background-color: white; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0px 4px 6px rgba(0,0,0,0.05); }
     </style>
 """, unsafe_allow_html=True)
 
-# Cabeçalho
-st.markdown("### 🟢 cencosud **media**")
-st.title("Simulador de Propostas DOOH - Brand100")
+# 2. Inicialização do Banco de Dados Local (SQLite)
+def init_db():
+    conn = sqlite3.connect('cencosud_dooh.db')
+    c = conn.cursor()
+    # Tabela de propostas salvas para Follow-up
+    c.execute('''CREATE TABLE IF NOT EXISTS propostas
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, data_criacao TEXT, nome_plano TEXT, cliente TEXT, 
+                  email TEXT, telefone TEXT, inicio TEXT, fim TEXT, lojas_ativas INTEGER, investimento REAL, impactos REAL, cpm REAL)''')
+    # Tabela para salvar preços customizados individualmente
+    c.execute('''CREATE TABLE IF NOT EXISTS precos_lojas (loja TEXT PRIMARY KEY, preco REAL)''')
+    conn.commit()
+    conn.close()
 
-# 2. Carregamento e Tratamento dos Dados
-@st.cache_data
+init_db()
+
+# 3. Carregamento dos Dados
+@st.cache_data(ttl=60) # Recarrega a cada 60s para atualizar preços do BD
 def load_data():
     file_path = "Proposta Comercial Interna - 220726 (2).xlsx"
     df = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
     df = df[df['Status'] == 'INSTALADA'].copy()
     
-    # Trazendo mais dados para o Dashboard e FORÇANDO que sejam lidos como números
+    # Extração de Coordenadas para o Mapa
+    coords = df['Coordenadas'].astype(str).str.split(',', expand=True)
+    df['Lat'] = pd.to_numeric(coords[0], errors='coerce')
+    df['Lon'] = pd.to_numeric(coords[1], errors='coerce')
+    
+    # Busca preços customizados no Banco de Dados
+    conn = sqlite3.connect('cencosud_dooh.db')
+    df_precos = pd.read_sql_query("SELECT loja, preco as preco_customizado FROM precos_lojas", conn)
+    conn.close()
+    
+    # Mesclando preços e montando UI
     df_ui = pd.DataFrame({
         'Selecionar': False,
         'Bandeira': df['Bandeira'],
@@ -70,53 +60,62 @@ def load_data():
         'Cidade': df['Cidade / Municipio'],
         'UF': df['UF'],
         'Classe': df['Público'],
-        # O pd.to_numeric garante que o sistema converta texto em número para não quebrar os gráficos
+        'Lat': df['Lat'],
+        'Lon': df['Lon'],
         '% Fem': pd.to_numeric(df['% Público Feminino'], errors='coerce'),
         '% Masc': pd.to_numeric(df['% Público Masculino'], errors='coerce'),
-        'Valor Diária Base (R$)': pd.to_numeric(df['Valor diária / cota'], errors='coerce').fillna(0),
+        'Valor Diária Base (R$)': pd.to_numeric(df['Valor diária / cota'], errors='coerce').fillna(349.0),
         'Diárias': 30,
         'Cotas': 1,
         'Impactos/Dia': (pd.to_numeric(df['Impactos IAB / Impressões OTS'], errors='coerce') / pd.to_numeric(df['Período da campanha (em dias)'], errors='coerce')).fillna(0),
         'Alcance/Dia': pd.to_numeric(df['Tráfego por dia'], errors='coerce').fillna(0)
     })
-    return df_ui
     
+    # Aplica o preço customizado se existir no BD
+    df_ui = pd.merge(df_ui, df_precos, how='left', left_on='Loja', right_on='loja')
+    df_ui['Valor Diária Base (R$)'] = df_ui['preco_customizado'].combine_first(df_ui['Valor Diária Base (R$)'])
+    df_ui.drop(columns=['loja', 'preco_customizado'], inplace=True)
+    
+    return df_ui
+
 try:
     df_ui = load_data()
 except Exception as e:
     st.error(f"Erro ao carregar a planilha. Detalhe: {e}")
     st.stop()
 
-# 3. Sidebar
-st.sidebar.image("logo.jpg", use_container_width=True)
-st.sidebar.header("Configurações Globais")
-desconto = st.sidebar.slider("Desconto Negociado (%)", 0, 100, 0)
+# Cabeçalho
+st.markdown("### 🟢 cencosud **media**")
+st.title("Simulador de Propostas DOOH - Brand100")
 
-# Criando as Abas (Tabs) para separar as áreas
-tab_plan, tab_admin = st.tabs(["📊 Planejamento do Plano", "⚙️ Área Admin"])
-
-# ================= ÁREA ADMIN =================
-with tab_admin:
-    st.header("Configurações Administrativas")
-    st.write("Ajuste o valor base cobrado pela diária em todas as lojas.")
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        novo_preco = st.number_input("Novo Preço Padrão (R$):", min_value=0.0, value=349.0, step=10.0)
-    with col_b:
-        st.write("")
-        st.write("")
-        if st.button("Aplicar Preço Global"):
-            st.session_state['preco_global'] = novo_preco
-            st.success("Preço global atualizado com sucesso!")
-
-# Atualiza o preço se foi alterado no admin
-if 'preco_global' in st.session_state:
-    df_ui['Valor Diária Base (R$)'] = st.session_state['preco_global']
+# Abas
+tab_plan, tab_admin = st.tabs(["📊 Planejamento da Campanha", "⚙️ Área Admin & Comerciais"])
 
 # ================= ÁREA DE PLANEJAMENTO =================
 with tab_plan:
-    st.write("### 1. Seleção de Praças e Lojas")
-    st.write("Selecione as lojas e ajuste a quantidade de diárias e cotas diretamente na tabela.")
+    st.write("### 1. Dados da Proposta")
+    
+    # Linha 1: Metadados
+    col_a, col_b, col_c, col_d = st.columns(4)
+    nome_plano = col_a.text_input("Nome do Plano (Ex: Q3 Lançamento)")
+    nome_cliente = col_b.text_input("Nome do Cliente / Agência")
+    email_cliente = col_c.text_input("E-mail Contato")
+    tel_cliente = col_d.text_input("Telefone Contato")
+    
+    # Linha 2: Datas (Ajuste automático de diárias)
+    col_e, col_f, col_g = st.columns([1, 1, 2])
+    data_inicio = col_e.date_input("Início da Campanha", datetime.today())
+    data_fim = col_f.date_input("Fim da Campanha", datetime.today() + timedelta(days=14))
+    
+    # Cálculo dinâmico das diárias pelo período
+    dias_campanha = max((data_fim - data_inicio).days + 1, 1)
+    df_ui['Diárias'] = dias_campanha
+    
+    desconto = col_g.slider("Desconto Negociado (%)", 0, 100, 0)
+    
+    st.write("---")
+    st.write("### 2. Seleção de Praças e Lojas")
+    st.info(f"💡 Dica: O período selecionado definiu as diárias padrão para **{dias_campanha} dias**. Você ainda pode ajustar individualmente na tabela.")
     
     # Tabela Editável
     edited_df = st.data_editor(
@@ -124,7 +123,7 @@ with tab_plan:
         column_config={
             "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
             "Valor Diária Base (R$)": st.column_config.NumberColumn("Valor Diária (R$)", format="R$ %.2f"),
-            "% Fem": None, "% Masc": None, "Impactos/Dia": None, "Alcance/Dia": None # Ocultando dados sensíveis da tabela
+            "Lat": None, "Lon": None, "% Fem": None, "% Masc": None, "Impactos/Dia": None, "Alcance/Dia": None
         },
         disabled=["Bandeira", "Loja", "Cidade", "UF", "Classe"],
         hide_index=True,
@@ -146,9 +145,7 @@ with tab_plan:
         cpm = (total_liquido / total_impactos) * 1000 if total_impactos > 0 else 0
 
         st.write("---")
-        st.write("### 2. Resumo da Audiência e Resultados")
-        
-        # KPIs Principais
+        st.write("### 3. Resumo da Audiência e Resultados")
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Lojas Ativas", len(selected_stores))
         col2.metric("Alcance Total", f"{total_alcance:,.0f}".replace(',','.'))
@@ -158,48 +155,125 @@ with tab_plan:
 
         st.write("#### 👁️ Perfil da Audiência (Dashboard)")
         
-        # Dashboard Visual
-        dash_col1, dash_col2, dash_col3 = st.columns(3)
-        
+        dash_col1, dash_col2 = st.columns([1, 2])
         with dash_col1:
-            # Gráfico de Gênero
-            avg_fem = selected_stores['% Fem'].mean() * 100
-            avg_masc = selected_stores['% Masc'].mean() * 100
-            df_gender = pd.DataFrame({'Gênero': ['Feminino', 'Masculino'], 'Porcentagem': [avg_fem, avg_masc]})
-            fig_gender = px.pie(df_gender, values='Porcentagem', names='Gênero', hole=0.6, 
-                                color='Gênero', color_discrete_map={'Feminino':'#13C18E', 'Masculino':'#0A7051'})
-            fig_gender.update_layout(title_text='Perfil de Gênero', margin=dict(t=40, b=0, l=0, r=0), height=300)
-            st.plotly_chart(fig_gender, use_container_width=True)
-
-        with dash_col2:
-            # Gráfico de Classe Social
-            df_class = selected_stores.groupby('Classe')['Alcance Total'].sum().reset_index()
-            fig_class = px.bar(df_class, x='Classe', y='Alcance Total', text_auto='.2s', 
-                               color_discrete_sequence=['#13C18E'])
-            fig_class.update_layout(title_text='Alcance por Classe Social', margin=dict(t=40, b=0, l=0, r=0), height=300)
-            st.plotly_chart(fig_class, use_container_width=True)
-
-        with dash_col3:
-            # Gráfico de Distribuição por UF
             df_uf = selected_stores.groupby('UF')['Alcance Total'].sum().reset_index().sort_values('Alcance Total', ascending=True)
-            fig_uf = px.bar(df_uf, x='Alcance Total', y='UF', orientation='h', text_auto='.2s', 
-                            color_discrete_sequence=['#0A7051'])
-            fig_uf.update_layout(title_text='Alcance por Estado (UF)', margin=dict(t=40, b=0, l=0, r=0), height=300)
+            fig_uf = px.bar(df_uf, x='Alcance Total', y='UF', orientation='h', text_auto='.2s', color_discrete_sequence=['#13C18E'])
+            fig_uf.update_layout(title_text='Alcance Consolidado por Estado (UF)', margin=dict(t=40, b=0, l=0, r=0), height=350)
             st.plotly_chart(fig_uf, use_container_width=True)
 
-        # 3. Download do Excel
+        with dash_col2:
+            # Novo: Mapa Interativo de Alcance
+            fig_map = px.scatter_mapbox(
+                selected_stores.dropna(subset=['Lat', 'Lon']),
+                lat="Lat", lon="Lon", size="Alcance Total", color="UF", hover_name="Loja",
+                zoom=3, mapbox_style="carto-positron", color_discrete_sequence=['#13C18E', '#0A7051', '#32CD32']
+            )
+            fig_map.update_layout(title_text='Distribuição Geográfica do Impacto', margin=dict(t=40, b=0, l=0, r=0), height=350)
+            st.plotly_chart(fig_map, use_container_width=True)
+
+        # Ações Finais: Salvar BD e Exportar Excel Customizado
         st.write("---")
+        action_col1, action_col2 = st.columns([1, 1])
+        
+        # Rotina de criação do Excel com XlsxWriter
         output = io.BytesIO()
-        df_export = selected_stores.drop(columns=['Selecionar', '% Fem', '% Masc', 'Impactos/Dia', 'Alcance/Dia']).rename(columns={'Valor Diária Base (R$)': 'Valor Diária (R$)'})
+        workbook = pd.ExcelWriter(output, engine='xlsxwriter')
+        df_export = selected_stores.drop(columns=['Selecionar', '% Fem', '% Masc', 'Lat', 'Lon', 'Impactos/Dia', 'Alcance/Dia']).rename(columns={'Valor Diária Base (R$)': 'Valor Diária (R$)'})
+        df_export.to_excel(workbook, index=False, sheet_name='Proposta_DOOH', startrow=10)
         
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_export.to_excel(writer, index=False, sheet_name='Resumo_Proposta')
+        wb = workbook.book
+        ws = workbook.sheets['Proposta_DOOH']
         
-        st.download_button(
-            label="📥 Baixar Plano Completo em Excel",
-            data=output.getvalue(),
-            file_name="Plano_DOOH_Cencosud.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        # Estilos Customizados
+        header_fmt = wb.add_format({'bold': True, 'bg_color': '#13C18E', 'font_color': 'white', 'border': 1})
+        title_fmt = wb.add_format({'bold': True, 'font_size': 14})
+        
+        try: ws.insert_image('A1', 'logo.jpg', {'x_scale': 0.4, 'y_scale': 0.4})
+        except: pass
+        
+        data_validade = (datetime.today() + timedelta(days=15)).strftime("%d/%m/%Y")
+        ws.write('D2', 'RESUMO DA PROPOSTA COMERCIAL - DOOH', title_fmt)
+        ws.write('A6', 'Nome do Plano:', header_fmt); ws.write('B6', nome_plano)
+        ws.write('A7', 'Cliente/Agência:', header_fmt); ws.write('B7', nome_cliente)
+        ws.write('A8', 'Período:', header_fmt); ws.write('B8', f"{data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}")
+        ws.write('D6', 'Investimento Total:', header_fmt); ws.write('E6', f"R$ {total_liquido:,.2f}")
+        ws.write('D7', 'Impactos Totais:', header_fmt); ws.write('E7', f"{total_impactos:,.0f}")
+        ws.write('D8', 'Validade Proposta:', header_fmt); ws.write('E8', f"{data_validade} (15 dias)")
+        
+        workbook.close()
+
+        with action_col1:
+            if st.button("💾 Salvar Proposta no Sistema (Follow-up)"):
+                if not nome_plano or not nome_cliente:
+                    st.warning("Preencha o Nome do Plano e o Cliente para salvar!")
+                else:
+                    conn = sqlite3.connect('cencosud_dooh.db')
+                    c = conn.cursor()
+                    c.execute("INSERT INTO propostas (data_criacao, nome_plano, cliente, email, telefone, inicio, fim, lojas_ativas, investimento, impactos, cpm) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                              (datetime.today().strftime("%Y-%m-%d %H:%M"), nome_plano, nome_cliente, email_cliente, tel_cliente, str(data_inicio), str(data_fim), len(selected_stores), total_liquido, total_impactos, cpm))
+                    conn.commit()
+                    conn.close()
+                    st.success("✅ Proposta salva com sucesso! O comercial já pode visualizar na Área Admin.")
+
+        with action_col2:
+            st.download_button(
+                label="📥 Baixar Proposta Executiva em Excel",
+                data=output.getvalue(),
+                file_name=f"Proposta_{nome_plano.replace(' ','_')}_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+# ================= ÁREA ADMIN & FOLLOW UP =================
+with tab_admin:
+    st.header("Área Restrita: Configurações e Follow-up")
+    
+    # Bloqueio por Senha
+    user = st.text_input("Usuário", key="user_admin")
+    senha = st.text_input("Senha", type="password", key="pass_admin")
+    
+    if user == "cencomedia" and senha == "brand100":
+        st.success("Autenticado com sucesso.")
+        admin_tab1, admin_tab2 = st.tabs(["💰 Ajuste de Preços (Lojas)", "📈 Follow-up de Propostas"])
+        
+        with admin_tab1:
+            st.write("### Tabela Mestra de Preços")
+            st.write("Altere o preço da diária base de qualquer loja aqui. A alteração ficará salva para as próximas vezes.")
+            
+            # Tabela admin para alterar o preço do banco
+            df_admin_precos = df_ui[['Loja', 'Valor Diária Base (R$)']].copy()
+            edited_precos = st.data_editor(df_admin_precos, use_container_width=True, hide_index=True)
+            
+            # Botão para aplicar preço global em lote para simplificar a vida
+            novo_global = st.number_input("Atribuir Preço Global para TODAS as lojas", min_value=0.0, value=349.0)
+            if st.button("Forçar Preço Global"):
+                edited_precos['Valor Diária Base (R$)'] = novo_global
+                st.rerun() # Atualiza a tela com os novos preços
+                
+            if st.button("💾 Salvar Alterações de Preço"):
+                conn = sqlite3.connect('cencosud_dooh.db')
+                c = conn.cursor()
+                for index, row in edited_precos.iterrows():
+                    c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (row['Loja'], row['Valor Diária Base (R$)']))
+                conn.commit()
+                conn.close()
+                st.cache_data.clear() # Força o app a reler os dados novos
+                st.success("Preços atualizados com sucesso no Banco de Dados!")
+
+        with admin_tab2:
+            st.write("### Histórico Comercial")
+            st.write("Acompanhe as simulações geradas pela equipe.")
+            conn = sqlite3.connect('cencosud_dooh.db')
+            df_propostas = pd.read_sql_query("SELECT * FROM propostas ORDER BY id DESC", conn)
+            conn.close()
+            
+            if not df_propostas.empty:
+                st.dataframe(df_propostas, use_container_width=True, hide_index=True)
+                # Exportar o CSV do pipeline de vendas
+                csv_pipeline = df_propostas.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Exportar Histórico do Funil", csv_pipeline, "pipeline_vendas_brand100.csv", "text/csv")
+            else:
+                st.info("Nenhuma proposta salva no sistema ainda.")
     else:
-        st.info("💡 Navegue pela tabela acima e selecione pelo menos uma loja para liberar o dashboard de audiência e o download do plano.")
+        if user or senha:
+            st.error("Usuário ou senha incorretos.")
