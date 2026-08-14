@@ -4,14 +4,12 @@ import io
 import plotly.express as px
 import sqlite3
 from datetime import datetime, timedelta
-import folium
-from folium.plugins import MarkerCluster
-from streamlit_folium import st_folium
 
+# Banco de dados v4
 DB_NAME = 'cencosud_dooh_v4.db'
 
 # 1. Configuração da Página e Cores
-st.set_page_config(page_title="Simulador DOOH - Cencosud Media", page_icon="🟢", layout="wide")
+st.set_page_config(page_title="Simulador de Campanhas DOOH", page_icon="🟢", layout="wide")
 
 st.markdown("""
     <style>
@@ -53,7 +51,7 @@ def init_db():
 init_db()
 
 # 3. Carregamento dos Dados
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=1) 
 def load_data():
     file_path = "Proposta Comercial Interna - 220726 (2).xlsx"
     df = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
@@ -118,7 +116,7 @@ if 'store_edits' not in st.session_state:
     st.session_state['store_edits'] = {}
 
 st.image("logo.jpg", width=250)
-st.title("Simulador de Propostas DOOH - Brand100")
+st.title("Simulador de Campanhas DOOH")
 
 tab_plan, tab_admin = st.tabs(["📊 Planejamento da Campanha", "⚙️ Área Admin & Comerciais"])
 
@@ -260,22 +258,13 @@ with tab_plan:
             st.markdown("**Distribuição Geográfica do Impacto**")
             df_map = selected_stores.dropna(subset=['Lat', 'Lon'])
             if not df_map.empty:
-                center_lat = df_map['Lat'].mean()
-                center_lon = df_map['Lon'].mean()
-                m = folium.Map(location=[center_lat, center_lon], zoom_start=4)
-                
-                # Criando os Clusters para o mapa não quebrar
-                marker_cluster = MarkerCluster().add_to(m)
-                
-                for idx, row in df_map.iterrows():
-                    folium.Marker(
-                        location=[row['Lat'], row['Lon']],
-                        popup=f"{row['Loja']} (Alcance: {row['Alcance Total']:,.0f})",
-                        icon=folium.Icon(color='green', icon='info-sign')
-                    ).add_to(marker_cluster)
-                
-                # O returned_objects=[] blinda o mapa contra o excesso de envios de dados de volta ao Python
-                st_folium(m, height=350, use_container_width=True, returned_objects=[])
+                fig_map = px.scatter_mapbox(
+                    df_map, lat="Lat", lon="Lon", hover_name="Loja", hover_data={"Alcance Total": ":,.0f"},
+                    zoom=3, mapbox_style="carto-positron", color_discrete_sequence=['#13C18E']
+                )
+                fig_map.update_traces(marker=dict(size=9, opacity=0.8))
+                fig_map.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=350)
+                st.plotly_chart(fig_map, use_container_width=True)
             else:
                 st.info("As lojas selecionadas não possuem coordenadas válidas para plotagem.")
 
@@ -456,35 +445,44 @@ with tab_admin:
 
         with admin_tab3:
             st.write("### Tabela Mestra de Preços")
-            st.info("💡 Lembrete: Algumas lojas (ex: GIGA) vieram com o preço de R$ 400 diretamente da planilha original do Excel. Você pode alterar tudo abaixo.")
             
-            col_preco_tab, col_preco_glob = st.columns([2, 1])
+            st.write("Selecione as lojas que deseja alterar (ou clique na primeira caixinha do topo para marcar todas), digite o novo preço e clique em Salvar.")
             
-            with col_preco_tab:
-                df_admin_precos = df_ui[['Loja', 'Valor Diária Base (R$)']].copy()
-                edited_precos = st.data_editor(df_admin_precos, use_container_width=True, hide_index=True)
+            df_admin_precos = df_ui[['Loja', 'Valor Diária Base (R$)']].copy()
+            df_admin_precos.insert(0, 'Selecionar Lojas', False)
+            
+            col_tabela, col_acao = st.columns([2, 1])
+            
+            with col_tabela:
+                edited_precos = st.data_editor(
+                    df_admin_precos, 
+                    column_config={
+                        "Selecionar Lojas": st.column_config.CheckboxColumn(required=True),
+                        "Loja": st.column_config.Column(disabled=True),
+                        "Valor Diária Base (R$)": st.column_config.NumberColumn(format="R$ %.2f", disabled=True)
+                    },
+                    use_container_width=True, 
+                    hide_index=True
+                )
                 
-                if st.button("💾 Salvar Alterações Manuais da Tabela"):
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
-                    for index, row in edited_precos.iterrows():
-                        c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (row['Loja'], row['Valor Diária Base (R$)']))
-                    conn.commit()
-                    conn.close()
-                    st.cache_data.clear()
-                    st.success("Preços individuais atualizados com sucesso no Banco de Dados!")
-
-            with col_preco_glob:
-                st.write("**Forçar Preço Global**")
-                novo_global = st.number_input("Atribuir Preço Global para TODAS as lojas", min_value=0.0, value=349.0)
-                if st.button("Forçar Preço Global", use_container_width=True):
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
-                    # Salva no banco de dados para TODAS as lojas da base
-                    for loja in df_admin_precos['Loja']:
-                        c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (loja, novo_global))
-                    conn.commit()
-                    conn.close()
-                    st.cache_data.clear()
-                    st.success(f"Preço global de R$ {novo_global} aplicado a TODAS as lojas!")
-                    st.rerun()
+            with col_acao:
+                st.write("**Ação em Lote**")
+                lojas_selecionadas = edited_precos[edited_precos['Selecionar Lojas']]['Loja'].tolist()
+                
+                st.info(f"{len(lojas_selecionadas)} loja(s) selecionada(s).")
+                
+                novo_preco_lote = st.number_input("Digite o Novo Preço (R$)", min_value=0.0, value=349.0, step=10.0)
+                
+                if st.button("💾 Aplicar Preço nas Lojas Selecionadas", use_container_width=True):
+                    if len(lojas_selecionadas) > 0:
+                        conn = sqlite3.connect(DB_NAME)
+                        c = conn.cursor()
+                        for loja in lojas_selecionadas:
+                            c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (loja, novo_preco_lote))
+                        conn.commit()
+                        conn.close()
+                        st.cache_data.clear() 
+                        st.success("Preços atualizados com sucesso!")
+                        st.rerun()
+                    else:
+                        st.warning("Selecione pelo menos uma loja na tabela ao lado.")
