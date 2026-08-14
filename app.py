@@ -49,7 +49,7 @@ def init_db():
 
 init_db()
 
-# 3. Carregamento dos Dados (Sem cache restritivo para garantir leitura em tempo real)
+# 3. Carregamento dos Dados
 def load_data():
     file_path = "Proposta Comercial Interna - 220726 (2).xlsx"
     df = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
@@ -138,11 +138,22 @@ with tab_plan:
     contato_email = col_cont2.text_input("E-mail do Contato")
     contato_telefone = col_cont3.text_input("Telefone do Contato")
     
+    # CORREÇÃO 1: Sincronização de Datas com a Tabela
     col_d, col_e, col_f = st.columns([1, 1, 2])
     data_inicio = col_d.date_input("Início da Campanha", datetime.today())
     data_fim = col_e.date_input("Fim da Campanha", datetime.today() + timedelta(days=14))
     
-    dias_campanha = max((data_fim - data_inicio).days + 1, 1)
+    dias_campanha_atual = max((data_fim - data_inicio).days + 1, 1)
+    
+    if 'dias_campanha_salvo' not in st.session_state:
+        st.session_state['dias_campanha_salvo'] = dias_campanha_atual
+
+    if st.session_state['dias_campanha_salvo'] != dias_campanha_atual:
+        st.session_state['dias_campanha_salvo'] = dias_campanha_atual
+        for loja in st.session_state['store_edits']:
+            st.session_state['store_edits'][loja]['Diárias'] = dias_campanha_atual
+            
+    dias_campanha = dias_campanha_atual
     df_ui['Diárias'] = dias_campanha
     desconto = col_f.slider("Desconto Negociado (%)", 0, 100, 0)
     
@@ -348,7 +359,6 @@ with tab_plan:
 with tab_admin:
     st.header("Área Restrita")
     
-    # Sistema de login com botão explícito de acesso
     if 'autenticado' not in st.session_state:
         st.session_state['autenticado'] = False
 
@@ -455,27 +465,23 @@ with tab_admin:
                 st.success("Lista atualizada com sucesso!")
                 st.rerun()
 
+        # CORREÇÃO 2: Área de Gestão de Preços em Lote
         with admin_tab3:
             st.write("### Ajuste de Preços em Lote")
             
+            if 'selecionar_todas_admin' not in st.session_state:
+                st.session_state['selecionar_todas_admin'] = False
+            
             col_b1, col_b2 = st.columns(2)
-            if col_b1.button("✅ Selecionar Todas as Lojas", use_container_width=True):
-                conn = sqlite3.connect(DB_NAME)
-                c = conn.cursor()
-                file_path = "Proposta Comercial Interna - 220726 (2).xlsx"
-                df_temp = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
-                # Pega preço padrão global (ex: 349)
-                for loja in df_temp['Nome da Loja'].dropna():
-                    c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (loja, 349.0))
-                conn.commit()
-                conn.close()
-                st.success("Todas as lojas resetadas para o preço padrão de R$ 349,00!")
+            if col_b1.button("✅ Alternar Seleção de Todas as Lojas", use_container_width=True):
+                st.session_state['selecionar_todas_admin'] = not st.session_state['selecionar_todas_admin']
+                st.session_state['admin_key'] += 1 
                 st.rerun()
 
             st.write("Selecione as lojas abaixo na tabela, digite o novo preço e clique em aplicar.")
             
             df_admin_precos = df_ui[['Loja', 'Valor Diária Base (R$)']].copy()
-            df_admin_precos.insert(0, 'Selecionar', False)
+            df_admin_precos.insert(0, 'Selecionar', st.session_state['selecionar_todas_admin'])
             
             col_tabela, col_acao = st.columns([2, 1])
             
@@ -484,7 +490,7 @@ with tab_admin:
                     df_admin_precos,
                     key=f"admin_table_{st.session_state['admin_key']}",
                     column_config={
-                        "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+                        "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
                         "Loja": st.column_config.Column(disabled=True),
                         "Valor Diária Base (R$)": st.column_config.NumberColumn("Valor Diária (R$)", format="R$ %.2f")
                     },
@@ -509,7 +515,10 @@ with tab_admin:
                         conn.close()
                         
                         st.session_state['admin_key'] += 1
+                        st.session_state['plan_key'] += 1 
+                        st.session_state['selecionar_todas_admin'] = False 
+                        
                         st.success("Preços atualizados com sucesso no Banco de Dados!")
                         st.rerun()
                     else:
-                        st.warning("Selecione pelo menos uma loja na tabela.")
+                        st.warning("Selecione pelo menos uma loja na tabela para aplicar o preço.")
