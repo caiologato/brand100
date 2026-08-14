@@ -1,0 +1,392 @@
+import streamlit as st
+import pandas as pd
+import io
+import plotly.express as px
+import sqlite3
+from datetime import datetime, timedelta
+
+# 1. Configuração da Página e Cores
+st.set_page_config(page_title="Simulador DOOH - Cencosud Media", page_icon="🟢", layout="wide")
+
+st.markdown("""
+    <style>
+    .stApp { background-color: #F8F9FA; color: #333333; }
+    .stTabs [data-baseweb="tab-list"] { gap: 20px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #ffffff; border-radius: 4px 4px 0px 0px; padding: 10px; font-weight: 500;}
+    .stTabs [aria-selected="true"] { background-color: #13C18E !important; color: white !important; font-weight: bold; }
+    .stButton>button, .stDownloadButton>button { background-color: #13C18E !important; color: white !important; border-radius: 8px !important; border: none !important; font-weight: bold !important; }
+    .stButton>button:hover, .stDownloadButton>button:hover { background-color: #0A7051 !important; }
+    div[data-testid="metric-container"] { background-color: white; border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; box-shadow: 0px 4px 6px rgba(0,0,0,0.05); }
+    </style>
+""", unsafe_allow_html=True)
+
+# 2. Inicialização do Banco de Dados Local (SQLite)
+def init_db():
+    conn = sqlite3.connect('cencosud_dooh.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS propostas
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, data_criacao TEXT, comercial TEXT, nome_plano TEXT, 
+                  cliente TEXT, inicio TEXT, fim TEXT, investimento REAL, impactos REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS precos_lojas (loja TEXT PRIMARY KEY, preco REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS comerciais (nome TEXT PRIMARY KEY, email TEXT, telefone TEXT)''')
+    
+    c.execute("SELECT COUNT(*) FROM comerciais")
+    if c.fetchone()[0] == 0:
+        default_comerciais = [
+            ("Victoria Osti", "victoria.osti@cencosud.com.br", "+55 11 98919-4893"),
+            ("Amanda Miguel", "amanda.galvao@cencosud.com.br", "+55 11 99883-2734"),
+            ("Vivian Tostes", "vivian.tostes@cencosud.com.br", "+55 21 99922-1919"),
+            ("Caio Logato", "caio.logato@cencosud.com.br", "+55 11 94167-9472")
+        ]
+        c.executemany("INSERT INTO comerciais VALUES (?,?,?)", default_comerciais)
+        
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# 3. Carregamento dos Dados
+@st.cache_data(ttl=60)
+def load_data():
+    file_path = "Proposta Comercial Interna - 220726 (2).xlsx"
+    df = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
+    df = df[df['Status'] == 'INSTALADA'].copy()
+    
+    def extract_coord(val, idx):
+        try: return float(str(val).split(',')[idx].strip())
+        except: return None
+        
+    df['Lat'] = df['Coordenadas'].apply(lambda x: extract_coord(x, 0))
+    df['Lon'] = df['Coordenadas'].apply(lambda x: extract_coord(x, 1))
+    
+    conn = sqlite3.connect('cencosud_dooh.db')
+    df_precos = pd.read_sql_query("SELECT loja, preco as preco_customizado FROM precos_lojas", conn)
+    conn.close()
+    
+    df_ui = pd.DataFrame({
+        'Selecionar': False,
+        'Bandeira': df['Bandeira'],
+        'Loja': df['Nome da Loja'],
+        'Cidade': df['Cidade / Municipio'],
+        'UF': df['UF'],
+        'Classe': df['Público'],
+        'Lat': df['Lat'],
+        'Lon': df['Lon'],
+        '% Fem': pd.to_numeric(df['% Público Feminino'], errors='coerce'),
+        '% Masc': pd.to_numeric(df['% Público Masculino'], errors='coerce'),
+        'Valor Diária Base (R$)': pd.to_numeric(df['Valor diária / cota'], errors='coerce').fillna(349.0),
+        'Diárias': 30,
+        'Cotas': 1,
+        'Impactos/Dia': (pd.to_numeric(df['Impactos IAB / Impressões OTS'], errors='coerce') / pd.to_numeric(df['Período da campanha (em dias)'], errors='coerce')).fillna(0),
+        'Alcance/Dia': pd.to_numeric(df['Tráfego por dia'], errors='coerce').fillna(0)
+    })
+    
+    df_ui = pd.merge(df_ui, df_precos, how='left', left_on='Loja', right_on='loja')
+    df_ui['Valor Diária Base (R$)'] = df_ui['preco_customizado'].combine_first(df_ui['Valor Diária Base (R$)'])
+    df_ui.drop(columns=['loja', 'preco_customizado'], inplace=True)
+    return df_ui
+
+def get_comerciais():
+    conn = sqlite3.connect('cencosud_dooh.db')
+    df_comerciais = pd.read_sql_query("SELECT * FROM comerciais", conn)
+    conn.close()
+    return df_comerciais
+
+try:
+    df_ui = load_data()
+    df_comerciais = get_comerciais()
+except Exception as e:
+    st.error(f"Erro ao carregar a planilha. Detalhe: {e}")
+    st.stop()
+
+# Inicializa Memória de Seleções
+if 'selecionadas' not in st.session_state:
+    st.session_state['selecionadas'] = set()
+if 'store_edits' not in st.session_state:
+    st.session_state['store_edits'] = {}
+
+# Cabeçalho
+st.markdown("### 🟢 cencosud **media**")
+st.title("Simulador de Propostas DOOH")
+
+tab_plan, tab_admin = st.tabs(["📊 Planejamento da Campanha", "⚙️ Área Admin & Comerciais"])
+
+# ================= ÁREA DE PLANEJAMENTO =================
+with tab_plan:
+    st.write("### 1. Dados da Proposta")
+    col_a, col_b, col_c = st.columns([2, 2, 1.5])
+    nome_plano = col_a.text_input("Nome do Plano (Ex: Q3 Lançamento)")
+    nome_cliente = col_b.text_input("Cliente / Agência")
+    
+    lista_nomes = df_comerciais['nome'].tolist()
+    comercial_selecionado = col_c.selectbox("Comercial Responsável", options=lista_nomes)
+    dados_comercial = df_comerciais[df_comerciais['nome'] == comercial_selecionado].iloc[0]
+    
+    col_d, col_e, col_f = st.columns([1, 1, 2])
+    data_inicio = col_d.date_input("Início da Campanha", datetime.today())
+    data_fim = col_e.date_input("Fim da Campanha", datetime.today() + timedelta(days=14))
+    
+    dias_campanha = max((data_fim - data_inicio).days + 1, 1)
+    df_ui['Diárias'] = dias_campanha
+    desconto = col_f.slider("Desconto Negociado (%)", 0, 100, 0)
+    
+    st.write("---")
+    st.write("### 2. Seleção de Praças e Lojas")
+    
+    # Restaura seleções e edições da memória para a tabela base
+    df_ui['Selecionar'] = df_ui['Loja'].isin(st.session_state['selecionadas'])
+    for idx, row in df_ui.iterrows():
+        loja = row['Loja']
+        if loja in st.session_state['store_edits']:
+            edits = st.session_state['store_edits'][loja]
+            df_ui.at[idx, 'Diárias'] = edits.get('Diárias', dias_campanha)
+            df_ui.at[idx, 'Cotas'] = edits.get('Cotas', 1)
+            df_ui.at[idx, 'Valor Diária Base (R$)'] = edits.get('Valor Diária Base (R$)', row['Valor Diária Base (R$)'])
+
+    # BUSCA DE LOJAS
+    busca_loja = st.text_input("🔍 Buscar por Loja, Cidade ou UF:", "")
+    if busca_loja:
+        mask = df_ui['Loja'].str.contains(busca_loja, case=False, na=False) | \
+               df_ui['Cidade'].str.contains(busca_loja, case=False, na=False) | \
+               df_ui['UF'].str.contains(busca_loja, case=False, na=False)
+        df_display = df_ui[mask].copy()
+    else:
+        df_display = df_ui.copy()
+
+    # BOTÕES DE SELEÇÃO EM MASSA (Aplica apenas no que está filtrado/visível)
+    col_btn1, col_btn2, _ = st.columns([2, 2, 6])
+    if col_btn1.button("✅ Selecionar Lojas Visíveis"):
+        for loja in df_display['Loja']:
+            st.session_state['selecionadas'].add(loja)
+        st.rerun()
+    if col_btn2.button("🟩 Desmarcar Lojas Visíveis"):
+        for loja in df_display['Loja']:
+            st.session_state['selecionadas'].discard(loja)
+        st.rerun()
+
+    # Tabela Editável
+    edited_df = st.data_editor(
+        df_display,
+        column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
+            "Valor Diária Base (R$)": st.column_config.NumberColumn("Valor Diária (R$)", format="R$ %.2f"),
+            "Lat": None, "Lon": None, "% Fem": None, "% Masc": None, "Impactos/Dia": None, "Alcance/Dia": None
+        },
+        disabled=["Bandeira", "Loja", "Cidade", "UF", "Classe"],
+        hide_index=True,
+        use_container_width=True
+    )
+
+    # Salva as edições do usuário na memória em tempo real
+    for _, row in edited_df.iterrows():
+        loja = row['Loja']
+        if row['Selecionar']: st.session_state['selecionadas'].add(loja)
+        else: st.session_state['selecionadas'].discard(loja)
+        
+        if loja not in st.session_state['store_edits']: st.session_state['store_edits'][loja] = {}
+        st.session_state['store_edits'][loja]['Diárias'] = row['Diárias']
+        st.session_state['store_edits'][loja]['Cotas'] = row['Cotas']
+        st.session_state['store_edits'][loja]['Valor Diária Base (R$)'] = row['Valor Diária Base (R$)']
+        
+        # Atualiza o dataframe principal invisivelmente para que os cálculos considerem tudo
+        mask = df_ui['Loja'] == loja
+        df_ui.loc[mask, 'Selecionar'] = row['Selecionar']
+        df_ui.loc[mask, 'Diárias'] = row['Diárias']
+        df_ui.loc[mask, 'Cotas'] = row['Cotas']
+        df_ui.loc[mask, 'Valor Diária Base (R$)'] = row['Valor Diária Base (R$)']
+
+    # Filtra as lojas que realmente estão selecionadas (mesmo as ocultas pela busca)
+    selected_stores = df_ui[df_ui['Selecionar']].copy()
+
+    if not selected_stores.empty:
+        selected_stores['Investimento Bruto'] = selected_stores['Valor Diária Base (R$)'] * selected_stores['Diárias'] * selected_stores['Cotas']
+        selected_stores['Investimento Líquido'] = selected_stores['Investimento Bruto'] * (1 - desconto/100)
+        selected_stores['Impactos Totais'] = selected_stores['Impactos/Dia'] * selected_stores['Diárias']
+        selected_stores['Alcance Total'] = selected_stores['Alcance/Dia'] * selected_stores['Diárias']
+
+        total_liquido = selected_stores['Investimento Líquido'].sum()
+        total_impactos = selected_stores['Impactos Totais'].sum()
+        total_alcance = selected_stores['Alcance Total'].sum()
+        cpm = (total_liquido / total_impactos) * 1000 if total_impactos > 0 else 0
+
+        st.write("---")
+        st.write("### 3. Resumo da Audiência e Resultados")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Lojas Ativas", len(selected_stores))
+        col2.metric("Alcance Total", f"{total_alcance:,.0f}".replace(',','.'))
+        col3.metric("Impactos (IAB)", f"{total_impactos:,.0f}".replace(',','.'))
+        col4.metric("Investimento Líquido", f"R$ {total_liquido:,.2f}".replace(',','x').replace('.',',').replace('x','.'))
+        col5.metric("CPM Médio", f"R$ {cpm:,.2f}".replace(',','x').replace('.',',').replace('x','.'))
+
+        st.write("#### 👁️ Perfil da Audiência (Dashboard)")
+        
+        row1_col1, row1_col2 = st.columns(2)
+        row2_col1, row2_col2 = st.columns(2)
+        
+        with row1_col1:
+            avg_fem = selected_stores['% Fem'].mean() * 100
+            avg_masc = selected_stores['% Masc'].mean() * 100
+            df_gender = pd.DataFrame({'Gênero': ['Feminino', 'Masculino'], 'Porcentagem': [avg_fem, avg_masc]})
+            fig_gender = px.pie(df_gender, values='Porcentagem', names='Gênero', hole=0.6, color='Gênero', color_discrete_map={'Feminino':'#13C18E', 'Masculino':'#0A7051'})
+            fig_gender.update_layout(title_text='Perfil de Gênero', margin=dict(t=40, b=0, l=0, r=0), height=300)
+            st.plotly_chart(fig_gender, use_container_width=True)
+
+        with row1_col2:
+            df_class = selected_stores.groupby('Classe')['Alcance Total'].sum().reset_index()
+            fig_class = px.bar(df_class, x='Classe', y='Alcance Total', text_auto='.2s', color_discrete_sequence=['#13C18E'])
+            fig_class.update_layout(title_text='Alcance por Classe Social', margin=dict(t=40, b=0, l=0, r=0), height=300)
+            st.plotly_chart(fig_class, use_container_width=True)
+            
+        with row2_col1:
+            df_uf = selected_stores.groupby('UF')['Alcance Total'].sum().reset_index().sort_values('Alcance Total', ascending=True)
+            fig_uf = px.bar(df_uf, x='Alcance Total', y='UF', orientation='h', text_auto='.2s', color_discrete_sequence=['#13C18E'])
+            fig_uf.update_layout(title_text='Alcance Consolidado por Estado (UF)', margin=dict(t=40, b=0, l=0, r=0), height=350)
+            st.plotly_chart(fig_uf, use_container_width=True)
+
+        with row2_col2:
+            df_map = selected_stores.dropna(subset=['Lat', 'Lon'])
+            if not df_map.empty:
+                fig_map = px.scatter_mapbox(
+                    df_map, lat="Lat", lon="Lon", size="Alcance Total", hover_name="Loja",
+                    zoom=3, mapbox_style="carto-positron", color_discrete_sequence=['#13C18E']
+                )
+                fig_map.update_layout(title_text='Distribuição Geográfica do Impacto', margin=dict(t=40, b=0, l=0, r=0), height=350)
+                st.plotly_chart(fig_map, use_container_width=True)
+
+        st.write("---")
+        action_col1, action_col2 = st.columns([1, 1])
+        
+        output = io.BytesIO()
+        workbook = pd.ExcelWriter(output, engine='xlsxwriter')
+        
+        df_export = selected_stores.drop(columns=['Selecionar', '% Fem', '% Masc', 'Lat', 'Lon', 'Impactos/Dia', 'Alcance/Dia', 'Investimento Bruto']).rename(columns={'Valor Diária Base (R$)': 'Valor Diária (R$)', 'Investimento Líquido': 'Investimento Final (R$)'})
+        df_export.to_excel(workbook, index=False, sheet_name='Proposta_DOOH', startrow=11)
+        
+        wb = workbook.book
+        ws = workbook.sheets['Proposta_DOOH']
+        
+        ws.set_column('A:A', 15)
+        ws.set_column('B:B', 30)
+        ws.set_column('C:C', 20)
+        ws.set_column('D:E', 10)
+        ws.set_column('F:H', 12)
+        ws.set_column('I:J', 20)
+        ws.set_column('K:K', 15)
+        
+        header_fmt = wb.add_format({'bold': True, 'bg_color': '#13C18E', 'font_color': 'white', 'border': 1})
+        title_fmt = wb.add_format({'bold': True, 'font_size': 16, 'font_color': '#13C18E'})
+        money_fmt = wb.add_format({'num_format': 'R$ #,##0.00'})
+        num_fmt = wb.add_format({'num_format': '#,##0'})
+        
+        try: ws.insert_image('A1', 'logo.jpg', {'x_scale': 0.15, 'y_scale': 0.15})
+        except: pass
+        
+        data_validade = (datetime.today() + timedelta(days=15)).strftime("%d/%m/%Y")
+        
+        ws.merge_range('D2:I2', 'RESUMO DA PROPOSTA COMERCIAL - DOOH', title_fmt)
+        ws.write('A7', 'Plano:', header_fmt); ws.write('B7', nome_plano)
+        ws.write('A8', 'Cliente:', header_fmt); ws.write('B8', nome_cliente)
+        ws.write('A9', 'Período:', header_fmt); ws.write('B9', f"{data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')}")
+        
+        ws.write('D7', 'Investimento Total:', header_fmt); ws.write('E7', total_liquido, money_fmt)
+        ws.write('D8', 'Impactos Totais:', header_fmt); ws.write('E8', total_impactos, num_fmt)
+        ws.write('D9', 'Validade:', header_fmt); ws.write('E9', f"{data_validade} (15 dias)")
+        
+        ws.write('G7', 'Comercial:', header_fmt); ws.write('H7', dados_comercial['nome'])
+        ws.write('G8', 'E-mail:', header_fmt); ws.write('H8', dados_comercial['email'])
+        ws.write('G9', 'Telefone:', header_fmt); ws.write('H9', dados_comercial['telefone'])
+        
+        ws.set_column('I:I', 20, money_fmt)
+        ws.set_column('J:K', 15, num_fmt)
+        
+        workbook.close()
+
+        with action_col1:
+            if st.button("💾 Salvar Proposta no Sistema"):
+                if not nome_plano or not nome_cliente:
+                    st.warning("Preencha o Nome do Plano e o Cliente no topo da página para salvar!")
+                else:
+                    conn = sqlite3.connect('cencosud_dooh.db')
+                    c = conn.cursor()
+                    c.execute("INSERT INTO propostas (data_criacao, comercial, nome_plano, cliente, inicio, fim, investimento, impactos) VALUES (?,?,?,?,?,?,?,?)",
+                              (datetime.today().strftime("%Y-%m-%d %H:%M"), dados_comercial['nome'], nome_plano, nome_cliente, str(data_inicio), str(data_fim), total_liquido, total_impactos))
+                    conn.commit()
+                    conn.close()
+                    st.success("✅ Proposta salva com sucesso!")
+
+        with action_col2:
+            st.download_button(
+                label="📥 Baixar Proposta Executiva em Excel",
+                data=output.getvalue(),
+                file_name=f"Proposta_{nome_plano.replace(' ','_')}_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+# ================= ÁREA ADMIN & FOLLOW UP =================
+with tab_admin:
+    st.header("Área Restrita")
+    user = st.text_input("Usuário", key="user_admin")
+    senha = st.text_input("Senha", type="password", key="pass_admin")
+    
+    if user == "cencomedia" and senha == "brand100":
+        st.success("Autenticado com sucesso.")
+        admin_tab1, admin_tab2, admin_tab3 = st.tabs(["👥 Gerenciar Comerciais", "💰 Ajuste de Preços", "📈 Follow-up de Propostas"])
+        
+        with admin_tab1:
+            st.write("### Equipe Comercial")
+            edited_comerciais = st.data_editor(df_comerciais, num_rows="dynamic", use_container_width=True, hide_index=True)
+            if st.button("💾 Salvar Contatos"):
+                conn = sqlite3.connect('cencosud_dooh.db')
+                c = conn.cursor()
+                c.execute("DELETE FROM comerciais")
+                for index, row in edited_comerciais.iterrows():
+                    if pd.notna(row['nome']) and str(row['nome']).strip() != "":
+                        c.execute("INSERT INTO comerciais (nome, email, telefone) VALUES (?, ?, ?)", (row['nome'], row['email'], row['telefone']))
+                conn.commit()
+                conn.close()
+                st.cache_data.clear()
+                st.success("Lista atualizada com sucesso! A página será recarregada.")
+                st.rerun()
+
+        with admin_tab2:
+            st.write("### Tabela Mestra de Preços")
+            df_admin_precos = df_ui[['Loja', 'Valor Diária Base (R$)']].copy()
+            edited_precos = st.data_editor(df_admin_precos, use_container_width=True, hide_index=True)
+            novo_global = st.number_input("Atribuir Preço Global para TODAS as lojas", min_value=0.0, value=349.0)
+            if st.button("Forçar Preço Global"):
+                edited_precos['Valor Diária Base (R$)'] = novo_global
+                st.rerun()
+            if st.button("💾 Salvar Alterações de Preço"):
+                conn = sqlite3.connect('cencosud_dooh.db')
+                c = conn.cursor()
+                for index, row in edited_precos.iterrows():
+                    c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (row['Loja'], row['Valor Diária Base (R$)']))
+                conn.commit()
+                conn.close()
+                st.cache_data.clear()
+                st.success("Preços atualizados com sucesso no Banco de Dados!")
+
+        with admin_tab3:
+            st.write("### Histórico de Simulações")
+            conn = sqlite3.connect('cencosud_dooh.db')
+            df_propostas = pd.read_sql_query("SELECT * FROM propostas ORDER BY id DESC", conn)
+            conn.close()
+            
+            if not df_propostas.empty:
+                # Sistema de Busca e Filtro de Follow-up
+                col_busca, col_filtro = st.columns([3, 1])
+                busca_hist = col_busca.text_input("🔍 Buscar no histórico (Plano, Cliente...)", "")
+                lista_filtro_comerciais = ["Todos"] + df_propostas['comercial'].unique().tolist()
+                filtro_comercial = col_filtro.selectbox("Filtrar por Comercial", options=lista_filtro_comerciais)
+                
+                # Aplicando os filtros
+                if busca_hist:
+                    mask = df_propostas.astype(str).apply(lambda x: x.str.contains(busca_hist, case=False)).any(axis=1)
+                    df_propostas = df_propostas[mask]
+                    
+                if filtro_comercial != "Todos":
+                    df_propostas = df_propostas[df_propostas['comercial'] == filtro_comercial]
+                    
+                st.dataframe(df_propostas, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhuma proposta salva no sistema ainda.")
