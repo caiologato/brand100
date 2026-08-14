@@ -62,7 +62,7 @@ def load_data():
     df = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
     df = df[df['Status'] == 'INSTALADA'].copy()
     
-    # Trazendo mais dados para o Dashboard
+    # Trazendo mais dados para o Dashboard e FORÇANDO que sejam lidos como números
     df_ui = pd.DataFrame({
         'Selecionar': False,
         'Bandeira': df['Bandeira'],
@@ -70,16 +70,17 @@ def load_data():
         'Cidade': df['Cidade / Municipio'],
         'UF': df['UF'],
         'Classe': df['Público'],
-        '% Fem': df['% Público Feminino'],
-        '% Masc': df['% Público Masculino'],
-        'Valor Diária Base (R$)': df['Valor diária / cota'].astype(float),
+        # O pd.to_numeric garante que o sistema converta texto em número para não quebrar os gráficos
+        '% Fem': pd.to_numeric(df['% Público Feminino'], errors='coerce'),
+        '% Masc': pd.to_numeric(df['% Público Masculino'], errors='coerce'),
+        'Valor Diária Base (R$)': pd.to_numeric(df['Valor diária / cota'], errors='coerce').fillna(0),
         'Diárias': 30,
         'Cotas': 1,
-        'Impactos/Dia': (df['Impactos IAB / Impressões OTS'] / df['Período da campanha (em dias)']).astype(float),
-        'Alcance/Dia': df['Tráfego por dia'].astype(float)
+        'Impactos/Dia': (pd.to_numeric(df['Impactos IAB / Impressões OTS'], errors='coerce') / pd.to_numeric(df['Período da campanha (em dias)'], errors='coerce')).fillna(0),
+        'Alcance/Dia': pd.to_numeric(df['Tráfego por dia'], errors='coerce').fillna(0)
     })
     return df_ui
-
+    
 try:
     df_ui = load_data()
 except Exception as e:
