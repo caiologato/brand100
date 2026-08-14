@@ -106,8 +106,8 @@ if 'store_edits' not in st.session_state:
     st.session_state['store_edits'] = {}
 
 # Cabeçalho
-st.markdown("### 🟢 cencosud **media**")
-st.title("Simulador de Propostas DOOH")
+st.image("logo.jpg", width=250) # O width controla o tamanho do logo na tela
+st.title("Simulador de Propostas DOOH - Brand100")
 
 tab_plan, tab_admin = st.tabs(["📊 Planejamento da Campanha", "⚙️ Área Admin & Comerciais"])
 
