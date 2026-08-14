@@ -138,7 +138,6 @@ with tab_plan:
     contato_email = col_cont2.text_input("E-mail do Contato")
     contato_telefone = col_cont3.text_input("Telefone do Contato")
     
-    # CORREÇÃO 1: Sincronização de Datas com a Tabela
     col_d, col_e, col_f = st.columns([1, 1, 2])
     data_inicio = col_d.date_input("Início da Campanha", datetime.today())
     data_fim = col_e.date_input("Fim da Campanha", datetime.today() + timedelta(days=14))
@@ -465,7 +464,6 @@ with tab_admin:
                 st.success("Lista atualizada com sucesso!")
                 st.rerun()
 
-        # CORREÇÃO 2: Área de Gestão de Preços em Lote
         with admin_tab3:
             st.write("### Ajuste de Preços em Lote")
             
@@ -510,7 +508,13 @@ with tab_admin:
                         conn = sqlite3.connect(DB_NAME)
                         c = conn.cursor()
                         for loja in lojas_selecionadas:
+                            # 1. Salva a edição no banco de dados
                             c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (loja, novo_preco_lote))
+                            
+                            # 2. ATUALIZA O CACHE: Limpa a memória da Aba 1 para que ela não desfaça essa alteração
+                            if loja in st.session_state['store_edits']:
+                                st.session_state['store_edits'][loja]['Valor Diária Base (R$)'] = novo_preco_lote
+                                
                         conn.commit()
                         conn.close()
                         
@@ -518,7 +522,7 @@ with tab_admin:
                         st.session_state['plan_key'] += 1 
                         st.session_state['selecionar_todas_admin'] = False 
                         
-                        st.success("Preços atualizados com sucesso no Banco de Dados!")
+                        st.success("Preços atualizados com sucesso no Banco de Dados e Cache limpo!")
                         st.rerun()
                     else:
                         st.warning("Selecione pelo menos uma loja na tabela para aplicar o preço.")
