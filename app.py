@@ -51,7 +51,7 @@ def init_db():
 init_db()
 
 # 3. Carregamento dos Dados
-@st.cache_data(ttl=1) 
+@st.cache_data
 def load_data():
     file_path = "Proposta Comercial Interna - 220726 (2).xlsx"
     df = pd.read_excel(file_path, sheet_name='Proposta DOOH - Simulador', header=5)
@@ -110,10 +110,15 @@ except Exception as e:
     st.error(f"Erro ao carregar a planilha. Detalhe: {e}")
     st.stop()
 
+# Inicialização de Variáveis de Estado e Chaves Dinâmicas
 if 'selecionadas' not in st.session_state:
     st.session_state['selecionadas'] = set()
 if 'store_edits' not in st.session_state:
     st.session_state['store_edits'] = {}
+if 'plan_key' not in st.session_state:
+    st.session_state['plan_key'] = 0
+if 'admin_key' not in st.session_state:
+    st.session_state['admin_key'] = 0
 
 st.image("logo.jpg", width=250)
 st.title("Simulador de Campanhas DOOH")
@@ -172,15 +177,22 @@ with tab_plan:
     df_display = df_ui[mask].copy()
 
     col_btn1, col_btn2, _ = st.columns([2, 2, 6])
-    if col_btn1.button("✅ Selecionar Visíveis"):
+    
+    # CORREÇÃO: Chave dinâmica força a atualização imediata da tabela ao clicar
+    if col_btn1.button("✅ Selecionar Lojas Visíveis"):
         for loja in df_display['Loja']: st.session_state['selecionadas'].add(loja)
+        st.session_state['plan_key'] += 1 # Força recarregar o widget
         st.rerun()
-    if col_btn2.button("🟩 Desmarcar Visíveis"):
+        
+    if col_btn2.button("🟩 Desmarcar Lojas Visíveis"):
         for loja in df_display['Loja']: st.session_state['selecionadas'].discard(loja)
+        st.session_state['plan_key'] += 1 # Força recarregar o widget
         st.rerun()
 
+    # Tabela com chave dinâmica associada
     edited_df = st.data_editor(
         df_display,
+        key=f"plan_table_{st.session_state['plan_key']}",
         column_config={
             "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
             "Valor Diária Base (R$)": st.column_config.NumberColumn("Valor Diária (R$)", format="R$ %.2f"),
@@ -258,11 +270,13 @@ with tab_plan:
             st.markdown("**Distribuição Geográfica do Impacto**")
             df_map = selected_stores.dropna(subset=['Lat', 'Lon'])
             if not df_map.empty:
+                # CORREÇÃO DO MAPA: Agora utilizando explicitamente o 'open-street-map' 
+                # que não bloqueia requisições e tamanho fixo para não dar erro com valores zerados
                 fig_map = px.scatter_mapbox(
-                    df_map, lat="Lat", lon="Lon", hover_name="Loja", hover_data={"Alcance Total": ":,.0f"},
-                    zoom=3, mapbox_style="carto-positron", color_discrete_sequence=['#13C18E']
+                    df_map, lat="Lat", lon="Lon", hover_name="Loja", 
+                    zoom=3, mapbox_style="open-street-map", color_discrete_sequence=['#13C18E']
                 )
-                fig_map.update_traces(marker=dict(size=9, opacity=0.8))
+                fig_map.update_traces(marker=dict(size=10, opacity=0.8))
                 fig_map.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=350)
                 st.plotly_chart(fig_map, use_container_width=True)
             else:
@@ -445,8 +459,7 @@ with tab_admin:
 
         with admin_tab3:
             st.write("### Tabela Mestra de Preços")
-            
-            st.write("Selecione as lojas que deseja alterar (ou clique na primeira caixinha do topo para marcar todas), digite o novo preço e clique em Salvar.")
+            st.write("Selecione as lojas que deseja alterar, digite o novo preço e clique em Salvar.")
             
             df_admin_precos = df_ui[['Loja', 'Valor Diária Base (R$)']].copy()
             df_admin_precos.insert(0, 'Selecionar Lojas', False)
@@ -454,8 +467,10 @@ with tab_admin:
             col_tabela, col_acao = st.columns([2, 1])
             
             with col_tabela:
+                # CORREÇÃO: Chave dinâmica força a atualização imediata da tabela de Admin
                 edited_precos = st.data_editor(
                     df_admin_precos, 
+                    key=f"admin_table_{st.session_state['admin_key']}",
                     column_config={
                         "Selecionar Lojas": st.column_config.CheckboxColumn(required=True),
                         "Loja": st.column_config.Column(disabled=True),
@@ -481,7 +496,11 @@ with tab_admin:
                             c.execute("INSERT OR REPLACE INTO precos_lojas (loja, preco) VALUES (?, ?)", (loja, novo_preco_lote))
                         conn.commit()
                         conn.close()
-                        st.cache_data.clear() 
+                        
+                        # Limpa o cache e atualiza a chave da tabela para forçar o recarregamento visual
+                        load_data.clear() 
+                        st.session_state['admin_key'] += 1 
+                        
                         st.success("Preços atualizados com sucesso!")
                         st.rerun()
                     else:
